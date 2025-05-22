@@ -17,14 +17,15 @@ import (
 	"github.com/charmbracelet/glamour"
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
 	"github.com/mark3labs/mcphost/pkg/history"
 	"github.com/mark3labs/mcphost/pkg/llm"
 	"github.com/mark3labs/mcphost/pkg/llm/anthropic"
 	"github.com/mark3labs/mcphost/pkg/llm/google"
 	"github.com/mark3labs/mcphost/pkg/llm/ollama"
 	"github.com/mark3labs/mcphost/pkg/llm/openai"
-	"github.com/spf13/cobra"
-	"golang.org/x/term"
 )
 
 var (
@@ -75,6 +76,7 @@ func Execute() {
 }
 
 var debugMode bool
+var serverMode bool
 
 func init() {
 	rootCmd.PersistentFlags().
@@ -90,6 +92,9 @@ func init() {
 	// Add debug flag
 	rootCmd.PersistentFlags().
 		BoolVar(&debugMode, "debug", false, "enable debug logging")
+
+	rootCmd.PersistentFlags().
+		BoolVar(&serverMode, "server", false, "run as a server")
 
 	flags := rootCmd.PersistentFlags()
 	flags.StringVar(&openaiBaseURL, "openai-url", "", "base URL for OpenAI API (defaults to api.openai.com)")
@@ -555,52 +560,62 @@ func runMCPHost(ctx context.Context) error {
 
 	messages := make([]history.HistoryMessage, 0)
 
-	// Main interaction loop
-	for {
-		var prompt string
-		err := huh.NewForm(huh.NewGroup(huh.NewText().
-			Title("Enter your prompt (Type /help for commands, Ctrl+C to quit)").
-			Value(&prompt).
-			CharLimit(5000)),
-		).WithWidth(getTerminalWidth()).
-			WithTheme(huh.ThemeCharm()).
-			Run()
+	hostLoop := func() error {
+		// Main interaction loop
+		for {
+			var prompt string
+			err := huh.NewForm(huh.NewGroup(huh.NewText().
+				Title("Enter your prompt (Type /help for commands, Ctrl+C to quit)").
+				Value(&prompt).
+				CharLimit(5000)),
+			).WithWidth(getTerminalWidth()).
+				WithTheme(huh.ThemeCharm()).
+				Run()
 
-		if err != nil {
-			// Check if it's a user abort (Ctrl+C)
-			if errors.Is(err, huh.ErrUserAborted) {
-				fmt.Println("\nGoodbye!")
-				return nil // Exit cleanly
+			if err != nil {
+				// Check if it's a user abort (Ctrl+C)
+				if errors.Is(err, huh.ErrUserAborted) {
+					fmt.Println("\nGoodbye!")
+					return nil // Exit cleanly
+				}
+				return err // Return other errors normally
 			}
-			return err // Return other errors normally
-		}
 
-		if prompt == "" {
-			continue
-		}
+			if prompt == "" {
+				continue
+			}
 
-		// Handle slash commands
-		handled, err := handleSlashCommand(
-			prompt,
-			mcpConfig,
-			mcpClients,
-			messages,
-		)
-		if err != nil {
-			return err
-		}
-		if handled {
-			continue
-		}
+			// Handle slash commands
+			handled, err := handleSlashCommand(
+				prompt,
+				mcpConfig,
+				mcpClients,
+				messages,
+			)
+			if err != nil {
+				return err
+			}
+			if handled {
+				continue
+			}
 
-		if len(messages) > 0 {
-			messages = pruneMessages(messages)
-		}
-		err = runPrompt(ctx, provider, mcpClients, allTools, prompt, &messages)
-		if err != nil {
-			return err
+			if len(messages) > 0 {
+				messages = pruneMessages(messages)
+			}
+			err = runPrompt(ctx, provider, mcpClients, allTools, prompt, &messages)
+			if err != nil {
+				return err
+			}
 		}
 	}
+
+	if serverMode {
+		err = runServer(ctx, provider, mcpClients, allTools)
+	} else {
+		err = hostLoop()
+	}
+
+	return err
 }
 
 // loadSystemPrompt loads the system prompt from a JSON file
